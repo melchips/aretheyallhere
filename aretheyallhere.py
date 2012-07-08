@@ -25,6 +25,7 @@ USAGE_MORE_INFO = """
 
 import os
 import sys
+import datetime
 import sqlalchemy
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -87,7 +88,7 @@ class FileRecord(base):
         self.checksum = checksum
         self.mimetype = mimetype
         self.referential = referential
-
+       
     def __repr__(self):
         return "file:%s fullpath:%s checksum:%s referential:%s mime:%s" % (self.name, self.path, self.checksum, self.referential, self.mimetype)
 
@@ -102,6 +103,9 @@ class AreTheyAllHereApp:
         self.text_anim_state = 0
         self.text_anim = TEXT_ANIMATION
         self.text_anim_last_text_length = 0
+        self.total_files_in_source = 0
+        self.total_files_in_destination = 0
+        self.compute_time_start = 0
         
     # database initialization
     def init_database(self):
@@ -133,10 +137,17 @@ class AreTheyAllHereApp:
     
     # populate database from a given directory and its subdirectories
     def scan_and_populate_from_path(self, path, referential_name):
+        processed_files_count = 0
+
         for r,d,f in os.walk(path):
             for files in f:
                 filepath = os.path.join(r, files)
-                self.text_progress_anim("processing file " + filepath)
+                files_left_to_be_processed = (self.total_files_in_source + self.total_files_in_destination - processed_files_count)
+                if processed_files_count > 0: 
+                    remaining_time = (datetime.datetime.now() - self.compute_time_start)/processed_files_count * files_left_to_be_processed
+                else:
+                    remaining_time = datetime.timedelta()
+                self.text_progress_anim("processing file %d/%d from referential %s (%s remaining)" % (processed_files_count, self.total_files_in_source + self.total_files_in_destination, referential_name, self.get_remaining_time_as_string(remaining_time) ))
                 filechecksum = self.get_file_checksum(filepath)
                 filename = files
                 # TODO : extract mime info
@@ -145,9 +156,16 @@ class AreTheyAllHereApp:
                 filerecord = FileRecord(filename, filepath, filechecksum, filemimetype, filereferential) 
                 self.session.add(filerecord)
                 self.session.commit()
+                processed_files_count += 1
+                self.compute_time_end = datetime.datetime.now()
+                self.compute_time_last_total = self.compute_time_end - self.compute_time_start
 
     # scan given directories and populate database with it
     def populate_database(self):
+        self.total_files_in_source = self.count_total_files_in_path(self.path_source)
+        self.total_files_in_destination = self.count_total_files_in_path(self.path_destination)
+        self.compute_time_start = datetime.datetime.now()
+
         self.scan_and_populate_from_path(self.path_source, 'source')
         self.scan_and_populate_from_path(self.path_destination, 'destination')
         self.text_progress_anim_erase()
@@ -167,6 +185,37 @@ class AreTheyAllHereApp:
             return True
         else:
             return False
+
+    def count_total_files_in_path(self, path):
+        file_count = 0
+        for root, dirs, files in os.walk(path):
+            self.text_progress_anim("counting files in path %s" % path)
+            file_count += len(files)
+        self.text_progress_anim_erase()
+        return file_count
+
+    def get_remaining_time_as_string(self, timedelta):
+        output = ''
+        hours, remain = divmod(timedelta.seconds, 3600)
+        minutes, seconds = divmod(remain, 60)
+
+        if timedelta.days == 1:
+            output += '1 day, '
+        elif timedelta.days > 1:
+            output +=  '%d days, ' % timedelta.days
+        if hours == 1:
+            output += '1 hour, '
+        elif hours > 1:
+            output += '%d hours, ' % hours
+        if minutes == 1:
+            output += '1 minute and '
+        elif minutes > 1:
+            output += '%d minutes and ' % minutes
+        if seconds == 1:
+            output += '1 second'
+        else:
+            output += '%d seconds' % seconds
+        return output
 
 if __name__ == "__main__":
     myapp = AreTheyAllHereApp(PATH_SOURCE, PATH_DESTINATION)
