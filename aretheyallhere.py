@@ -32,6 +32,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.util import buffer
 import hashlib
 import argparse
+import mimetypes
 
 DATABASE_FILE = 'aretheyallhere.db'
 
@@ -64,6 +65,9 @@ parser.add_argument('-c', '--checksum-type', dest='checksum_type', choices=('sha
 parser.add_argument('-s','--source', metavar='path_source', dest='path_source', help='source path to be used for comparison')
 parser.add_argument('-d','--destination', metavar='path_destination', dest='path_destination', help='destination path in which we try to find files of source path')
 args = parser.parse_args()
+
+
+mimetypes.init()
 
 engine = create_engine(
         'sqlite:///%s' % args.database_file,
@@ -159,8 +163,7 @@ class AreTheyAllHereApp:
                 filechecksum = self.get_file_checksum(filepath)
                 filesize = os.path.getsize(filepath)
                 filename = files
-                # TODO : extract mime info
-                filemimetype = '?'
+                filemimetype, fileencoding = mimetypes.guess_type(filepath)
                 filereferential = referential_name
                 filerecord = FileRecord(filename, filepath, filechecksum, filemimetype, filereferential) 
                 self.session.add(filerecord)
