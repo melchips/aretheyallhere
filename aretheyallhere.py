@@ -17,9 +17,7 @@
 """
 
 USAGE_MORE_INFO = """
-    This script feeds a sqlite database with files and their checksums (SHA1) from two different folders and subfolders
-
-    Purpose:
+    This script feeds a sqlite database with files and their checksums (SHA1 by default) from two different folders and subfolders.
     It can be used to tell if all files of the source directory are in the destination folder, whatever their path may be (the comparison is made by checking the missing checksums in destination)
 """
 
@@ -33,6 +31,7 @@ from sqlalchemy import Column, Integer, String, Boolean, Binary, LargeBinary, Da
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.util import buffer
 import hashlib
+import argparse
 
 DATABASE_FILE = 'aretheyallhere.db'
 
@@ -57,18 +56,17 @@ TEXT_ANIMATION = "|/-\\"
 # Converting the text animation string to a list
 TEXT_ANIMATION=[c for c in TEXT_ANIMATION]
 
-def usage():
-    print("Usage: %s path_source_of_comparison path_dest_of_comparison\n%s" % (sys.argv[0],USAGE_MORE_INFO) )
+parser = argparse.ArgumentParser(description=USAGE_MORE_INFO)
 
-if (len(sys.argv)!=3):
-    usage()
-    sys.exit(2)
-
-PATH_SOURCE = sys.argv[1]
-PATH_DESTINATION = sys.argv[2]
+parser.add_argument('-f', '--force', dest='force_overwrite', action='store_const', const=True, default=False, help='force overwriting the content of the database file')
+parser.add_argument('-db', '--database', metavar='database_file', dest='database_file', type=str, default=DATABASE_FILE, help='specify database file to be used by this app (default is file "' + DATABASE_FILE + '" in current path)')
+parser.add_argument('-c', '--checksum-type', dest='checksum_type', choices=('sha1','md5'), default='sha1', help='set checksum algorithm to be used for comparing files')
+parser.add_argument('-s','--source', metavar='path_source', dest='path_source', help='source path to be used for comparison')
+parser.add_argument('-d','--destination', metavar='path_destination', dest='path_destination', help='destination path in which we try to find files of source path')
+args = parser.parse_args()
 
 engine = create_engine(
-        'sqlite:///%s' % DATABASE_FILE,
+        'sqlite:///%s' % args.database_file,
         echo=False)
 base = declarative_base()
 
@@ -96,7 +94,7 @@ base.metadata.create_all(engine)
 
 # The main app
 class AreTheyAllHereApp:
-    def __init__(self, path_source, path_destination):
+    def __init__(self, path_source, path_destination, checksum_type):
         self.path_source = path_source
         self.path_destination = path_destination
         self.init_database()
@@ -110,6 +108,7 @@ class AreTheyAllHereApp:
         self.compute_time_start = 0
         self.processed_files_count = 0
         self.processed_size_count = 0
+        self.checksum_type = checksum_type
         
     # database initialization
     def init_database(self):
@@ -122,7 +121,12 @@ class AreTheyAllHereApp:
         checksum = ''
         fp = open(filepath, 'rb')
         if fp:
-            checksum = hashlib.sha1(fp.read()).hexdigest()
+            if self.checksum_type == 'sha1':
+                checksum = hashlib.sha1(fp.read()).hexdigest()
+            elif self.checksum_type == 'md5':
+                checksum = hashlib.md5(fp.read()).hexdigest()
+            else:
+                checksum = hashlib.md5(fp.read()).hexdigest()
         fp.close()
         return checksum
 
@@ -168,14 +172,26 @@ class AreTheyAllHereApp:
 
     # scan given directories and populate database with it
     def populate_database(self):
-        self.total_files_in_source, self.total_files_size_in_source = self.get_total_count_and_size_of_files_in_path(self.path_source)
-        self.total_files_in_destination, self.total_files_size_in_destination = self.get_total_count_and_size_of_files_in_path(self.path_destination)
+        if self.path_source != None:
+            self.total_files_in_source, self.total_files_size_in_source = self.get_total_count_and_size_of_files_in_path(self.path_source)
+        else:
+            self.total_files_in_source = 0
+            self.total_files_size_in_source = 0
+
+        if self.path_destination != None:
+            self.total_files_in_destination, self.total_files_size_in_destination = self.get_total_count_and_size_of_files_in_path(self.path_destination)
+        else:
+            self.total_files_in_destination = 0
+            self.total_files_size_in_destination = 0
+
         self.compute_time_start = datetime.datetime.now()
         self.processed_files_count = 0
         self.processed_size_count = 0
 
-        self.scan_and_populate_from_path(self.path_source, 'source')
-        self.scan_and_populate_from_path(self.path_destination, 'destination')
+        if self.path_source != None:
+            self.scan_and_populate_from_path(self.path_source, 'source')
+        if self.path_destination != None:
+            self.scan_and_populate_from_path(self.path_destination, 'destination')
         self.text_progress_anim_erase()
 
     # returns list of missing source files in destination folder
@@ -230,11 +246,11 @@ class AreTheyAllHereApp:
         return output
 
 if __name__ == "__main__":
-    myapp = AreTheyAllHereApp(PATH_SOURCE, PATH_DESTINATION)
-    if (myapp.is_database_empty()):
+    myapp = AreTheyAllHereApp(args.path_source, args.path_destination, args.checksum_type)
+    if (myapp.is_database_empty() or args.force_overwrite):
         myapp.populate_database()
-    else:
-        print("Warning : As the database '%s' is not empty, scanning is skipped to avoid overwriting. Please delete manually the database file to force scanning." % DATABASE_FILE)
+    elif args.path_source != None or args.path_destination != None :
+        print("Warning : As the database '%s' is not empty, scanning is skipped to avoid overwriting. Please delete manually the database file to force scanning or add the '--force' option." % args.database_file)
     print("List of missing file(s) in destination :")
     myapp.get_missing_source_files_in_destination()
     sys.exit(0)
