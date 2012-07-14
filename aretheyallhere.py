@@ -30,9 +30,11 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, Boolean, Binary, LargeBinary, Date
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.util import buffer
+from sqlalchemy import and_, or_
 import hashlib
 import argparse
 import mimetypes
+import PythonMagick
 
 DATABASE_FILE = 'aretheyallhere.db'
 
@@ -61,7 +63,8 @@ parser = argparse.ArgumentParser(description=USAGE_MORE_INFO)
 
 parser.add_argument('-f', '--force', dest='force_overwrite', action='store_const', const=True, default=False, help='force overwriting the content of the database file')
 parser.add_argument('-db', '--database', metavar='database_file', dest='database_file', type=str, default=DATABASE_FILE, help='specify database file to be used by this app (default is file "' + DATABASE_FILE + '" in current path)')
-parser.add_argument('-c', '--checksum-type', dest='checksum_type', choices=('sha1','md5'), default='sha1', help='set checksum algorithm to be used for comparing files')
+parser.add_argument('-c', '--checksum-type', dest='checksum_type', choices=('sha1','md5','none'), default='sha1', help='set checksum algorithm to be used for comparing files')
+parser.add_argument('-sic', '--special-image-checksum', dest='special_image_checksum', action='store_const', const=True, default=False, help='Use a special checksum for image files that is able to tell if two images are visually identical (similar to findimagedupes program), but may create false-positives as well as beeing slower')
 parser.add_argument('-s','--source', metavar='path_source', dest='path_source', help='source path to be used for comparison')
 parser.add_argument('-d','--destination', metavar='path_destination', dest='path_destination', help='destination path in which we try to find files of source path')
 args = parser.parse_args()
@@ -81,24 +84,26 @@ class FileRecord(base):
     name = Column(String)
     path = Column(String)
     checksum = Column(String)
+    checksum_special = Column(String)
     mimetype = Column(String)
     referential = Column(String)
 
-    def __init__(self, name, path, checksum, mimetype, referential):
+    def __init__(self, name, path, checksum, checksum_special, mimetype, referential):
         self.name = name
         self.path = path
         self.checksum = checksum
+        self.checksum_special = checksum_special
         self.mimetype = mimetype
         self.referential = referential
        
     def __repr__(self):
-        return "file:%s fullpath:%s checksum:%s referential:%s mime:%s" % (self.name, self.path, self.checksum, self.referential, self.mimetype)
+        return "file:%s fullpath:%s checksum:%s special_checksum:%s referential:%s mime:%s" % (self.name, self.path, self.checksum, self.checksum_special, self.referential, self.mimetype)
 
 base.metadata.create_all(engine)
 
 # The main app
 class AreTheyAllHereApp:
-    def __init__(self, path_source, path_destination, checksum_type):
+    def __init__(self, path_source, path_destination, checksum_type, special_image_checksum):
         self.path_source = path_source
         self.path_destination = path_destination
         self.init_database()
@@ -113,6 +118,7 @@ class AreTheyAllHereApp:
         self.processed_files_count = 0
         self.processed_size_count = 0
         self.checksum_type = checksum_type
+        self.special_image_checksum = special_image_checksum
         
     # database initialization
     def init_database(self):
@@ -129,9 +135,27 @@ class AreTheyAllHereApp:
                 checksum = hashlib.sha1(fp.read()).hexdigest()
             elif self.checksum_type == 'md5':
                 checksum = hashlib.md5(fp.read()).hexdigest()
+            elif self.checksum_type == 'none':
+                checksum = ''
             else:
                 checksum = hashlib.md5(fp.read()).hexdigest()
         fp.close()
+        return checksum
+
+    def get_special_image_checksum(self, filepath):
+        checksum = ''
+        image = PythonMagick.Image(filepath)
+        if image:
+            image.sample("160x160!")
+            image.modulate(100,-100,100)
+            image.blur(3,99)
+            image.equalize()
+            image.normalize()
+#            image.equalize()
+            image.sample("16x16")
+            image.threshold(0.5*65535.0)
+            image.monochrome()
+            checksum = image.signature()
         return checksum
 
     def text_progress_anim(self, additionnal_text):
@@ -160,12 +184,15 @@ class AreTheyAllHereApp:
                 else:
                     remaining_time = datetime.timedelta()
                 self.text_progress_anim("processing file %d/%d from referential %s (%s remaining)" % (self.processed_files_count, self.total_files_in_source + self.total_files_in_destination, referential_name, self.get_remaining_time_as_string(remaining_time) ))
+                filemimetype, fileencoding = mimetypes.guess_type(filepath)
+                filespecial_checksum = ''
+                if (self.special_image_checksum) and filemimetype!=None and filemimetype.split('/',1)[0] == 'image':
+                    filespecial_checksum = self.get_special_image_checksum(filepath)
                 filechecksum = self.get_file_checksum(filepath)
                 filesize = os.path.getsize(filepath)
                 filename = files
-                filemimetype, fileencoding = mimetypes.guess_type(filepath)
                 filereferential = referential_name
-                filerecord = FileRecord(filename, filepath, filechecksum, filemimetype, filereferential) 
+                filerecord = FileRecord(filename, filepath, filechecksum, filespecial_checksum, filemimetype, filereferential) 
                 self.session.add(filerecord)
                 self.session.commit()
                 self.processed_files_count += 1
@@ -192,16 +219,48 @@ class AreTheyAllHereApp:
         self.processed_size_count = 0
 
         if self.path_source != None:
+            self.clear_data_from_database('source')
             self.scan_and_populate_from_path(self.path_source, 'source')
         if self.path_destination != None:
+            self.clear_data_from_database('destination')
             self.scan_and_populate_from_path(self.path_destination, 'destination')
         self.text_progress_anim_erase()
 
     # returns list of missing source files in destination folder
     def get_missing_source_files_in_destination(self):
-        # select * from filerecord where referential='source' and checksum not in(select checksum from filerecord where referential='destination');
         files_count = 0
-        for files in self.session.query(FileRecord).filter(FileRecord.referential == 'source').filter(~FileRecord.checksum.in_(self.session.query(FileRecord.checksum).filter(FileRecord.referential == 'destination'))):
+        missing_files = ()
+        if self.special_image_checksum:
+            # select * from filerecord where referential='source'  and checksum not in(select checksum from filerecord where referential='destination') and (
+            #       (checksum_special is null or checksum_special="")
+            #       or
+            #       (checksum_special not in (select checksum_special from filerecord where referential='destination'))
+            # );
+            missing_files =  self.session.query(FileRecord).filter(FileRecord.referential == 'source').filter(
+                    and_(
+                        ~FileRecord.checksum.in_(
+                            self.session.query(FileRecord.checksum).filter(
+                                FileRecord.referential == 'destination'
+                                )
+                            ),
+                        or_(
+                            or_(
+                                FileRecord.checksum_special == None,
+                                FileRecord.checksum_special == ""
+                                ),
+                            ~FileRecord.checksum_special.in_(
+                                self.session.query(FileRecord.checksum_special).filter(
+                                    FileRecord.referential == 'destination'
+                                    )
+                                )
+                            )
+                        )
+                    )
+        else:
+            # select * from filerecord where referential='source' and checksum not in(select checksum from filerecord where referential='destination');
+            missing_files = self.session.query(FileRecord).filter(FileRecord.referential == 'source').filter(~FileRecord.checksum.in_(self.session.query(FileRecord.checksum).filter(FileRecord.referential == 'destination')))
+ 
+        for files in missing_files:
             print(files)
             files_count += 1
         print("Total = %d file(s)" % files_count)
@@ -212,6 +271,16 @@ class AreTheyAllHereApp:
             return True
         else:
             return False
+
+    def is_database_has_data_for_referential(self, referential):
+        if self.session.query(FileRecord).filter(FileRecord.referential == referential).count() == 0:
+            return False
+        else:
+            return True
+
+    def clear_data_from_database(self, referential):
+        self.session.query(FileRecord).filter(FileRecord.referential == referential).delete()
+        self.session.commit()
 
     def get_total_count_and_size_of_files_in_path(self, path):
         file_count = 0
@@ -249,11 +318,12 @@ class AreTheyAllHereApp:
         return output
 
 if __name__ == "__main__":
-    myapp = AreTheyAllHereApp(args.path_source, args.path_destination, args.checksum_type)
+    myapp = AreTheyAllHereApp(args.path_source, args.path_destination, args.checksum_type, args.special_image_checksum)
     if (myapp.is_database_empty() or args.force_overwrite):
         myapp.populate_database()
     elif args.path_source != None or args.path_destination != None :
         print("Warning : As the database '%s' is not empty, scanning is skipped to avoid overwriting. Please delete manually the database file to force scanning or add the '--force' option." % args.database_file)
-    print("List of missing file(s) in destination :")
-    myapp.get_missing_source_files_in_destination()
+    if myapp.is_database_has_data_for_referential('source') and myapp.is_database_has_data_for_referential('destination'):
+        print("List of missing file(s) in destination :")
+        myapp.get_missing_source_files_in_destination()
     sys.exit(0)
